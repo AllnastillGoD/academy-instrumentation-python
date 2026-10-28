@@ -1,0 +1,175 @@
+# Base44 development environment for the Meminator sample app (Honeycomb Academy).
+#
+# Everything runs from the cloned source, never from the images the project's own
+# docker-compose.yaml builds (those bundle a Parcel build and freeze the code):
+#   * the Python services run Flask's dev server in debug mode (auto-reloader) with
+#     their service directory bind-mounted at /app; dependencies come from the
+#     image built by .base44/python-service.Dockerfile (requirements only).
+#   * the frontend is served straight from services/web (static + src) by nginx, so
+#     it needs no build step at all. Edits show up on refresh.
+#
+# Only host port 3000 is published as the app entry point (single origin: nginx
+# serves the page and proxies /backend/ to backend-for-frontend). The backend is
+# also published on 10115 for direct curl-ing during development.
+#
+# SERVICE_PATH mirrors the project's own variable and selects which implementation
+# to run: "services" (default) or "services-implemented-version". Changing it needs
+# a rebuild: docker compose -f docker-compose.base44.yml up -d --build
+name: meminator
+
+services:
+  web:
+    image: nginx:alpine
+    labels:
+      base44.project: "Meminator web"
+      base44.kind: "web"
+      base44.port: "3000"
+    ports:
+      - "3000:80"
+    volumes:
+      - ./${SERVICE_PATH:-services}/web:/srv/web:ro
+      - ./.base44/nginx.dev.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      backend-for-frontend:
+        condition: service_healthy
+    restart: on-failure
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          wget -qO- http://127.0.0.1/static/index.html | grep -q Meminator
+          && wget -qO- http://127.0.0.1/backend/health | grep -q 'I am here'
+          || { echo "web unhealthy: static frontend and/or /backend proxy not responding"; exit 1; }
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  backend-for-frontend:
+    build:
+      context: .
+      dockerfile: .base44/python-service.Dockerfile
+      args:
+        SERVICE_PATH: ${SERVICE_PATH:-services}/backend-for-frontend-python
+    labels:
+      base44.project: "Meminator backend-for-frontend"
+      base44.kind: "api"
+      base44.port: "10115"
+    working_dir: /app
+    command: ["sh", "-ec", "exec flask run -p 10114 --host=0.0.0.0 --debug"]
+    environment:
+      - FLASK_APP=server.py
+    volumes:
+      - ./${SERVICE_PATH:-services}/backend-for-frontend-python:/app
+    ports:
+      - "10115:10114"
+    depends_on:
+      meminator:
+        condition: service_healthy
+      phrase-picker:
+        condition: service_healthy
+      image-picker:
+        condition: service_healthy
+    restart: on-failure
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS http://127.0.0.1:10114/health >/dev/null
+          || { echo "backend-for-frontend unhealthy: /health not responding on 10114"; exit 1; }
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  meminator:
+    build:
+      context: .
+      dockerfile: .base44/python-service.Dockerfile
+      args:
+        SERVICE_PATH: ${SERVICE_PATH:-services}/meminator-python
+        APT_PACKAGES: "imagemagick fontconfig"
+    labels:
+      base44.project: "Meminator image composer"
+      base44.kind: "api"
+    working_dir: /app
+    # fc-cache indexes the Angkor font that is bind-mounted below; the server needs
+    # it for "convert -font Angkor-Regular".
+    command:
+      - sh
+      - -ec
+      - >-
+        fc-cache -f >/dev/null 2>&1 || true;
+        exec flask run -p 10114 --host=0.0.0.0 --debug
+    environment:
+      - FLASK_APP=src/server.py
+    volumes:
+      - ./${SERVICE_PATH:-services}/meminator-python:/app
+      - ./${SERVICE_PATH:-services}/meminator-python/Angkor:/usr/share/fonts/truetype/angkor:ro
+    restart: on-failure
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS http://127.0.0.1:10114/health >/dev/null
+          || { echo "meminator unhealthy: /health not responding on 10114"; exit 1; }
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  phrase-picker:
+    build:
+      context: .
+      dockerfile: .base44/python-service.Dockerfile
+      args:
+        SERVICE_PATH: ${SERVICE_PATH:-services}/phrase-picker-python
+    labels:
+      base44.project: "Meminator phrase picker"
+      base44.kind: "api"
+    working_dir: /app
+    command: ["sh", "-ec", "exec flask run -p 10114 --host=0.0.0.0 --debug"]
+    environment:
+      - FLASK_APP=server.py
+    volumes:
+      - ./${SERVICE_PATH:-services}/phrase-picker-python:/app
+    restart: on-failure
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS http://127.0.0.1:10114/health >/dev/null
+          || { echo "phrase-picker unhealthy: /health not responding on 10114"; exit 1; }
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  image-picker:
+    build:
+      context: .
+      dockerfile: .base44/python-service.Dockerfile
+      args:
+        SERVICE_PATH: ${SERVICE_PATH:-services}/image-picker-python
+    labels:
+      base44.project: "Meminator image picker"
+      base44.kind: "api"
+    working_dir: /app
+    command: ["sh", "-ec", "exec flask run -p 10114 --host=0.0.0.0 --debug"]
+    environment:
+      - FLASK_APP=server.py
+      # Public S3 bucket of course images; no credentials involved.
+      - BUCKET_NAME=${BUCKET_NAME:-random-pictures}
+    volumes:
+      - ./${SERVICE_PATH:-services}/image-picker-python:/app
+    restart: on-failure
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS http://127.0.0.1:10114/health >/dev/null
+          || { echo "image-picker unhealthy: /health not responding on 10114"; exit 1; }
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
